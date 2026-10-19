@@ -119,4 +119,13 @@ export interface HttpInstrumentationConfig extends InstrumentationConfig {
    * @experimental
    */
   redactedQueryParamsServer?: string[];
+  /**
+   * Propagate context with `context.attach()` instead of `context.with()` /
+   * `context.bind()`, which reduces per-request allocations. Requires
+   * `@opentelemetry/api` >= 1.10 and a ContextManager implementing `attach()`
+   * (e.g. `AsyncLocalStorageContextManager`); otherwise falls back to the
+   * default behavior.
+   * @experimental
+   */
+  useContextAttach?: boolean;
 }

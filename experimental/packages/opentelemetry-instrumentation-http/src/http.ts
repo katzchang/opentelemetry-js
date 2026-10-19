@@ -4,6 +4,7 @@
  */
 
 import type {
+  Context,
   HrTime,
   Span,
   SpanOptions,
@@ -41,7 +42,9 @@ import {
   InstrumentationNodeModuleDefinition,
   safeExecuteInTheMiddle,
 } from '@opentelemetry/instrumentation';
+import type { EventEmitter } from 'events';
 import { errorMonitor } from 'events';
+import { bindEmitterWithAttach, withContextAttach } from './context-attach';
 import {
   ATTR_ERROR_TYPE,
   ATTR_HTTP_REQUEST_METHOD,
@@ -129,6 +132,21 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
   private _recordClientDuration(durationMs: number, attributes: Attributes) {
     // stable histogram is counted in S
     this._httpClientDurationHistogram.record(durationMs / 1000, attributes);
+  }
+
+  private _withContext<T>(ctx: Context, fn: () => T): T {
+    if (this.getConfig().useContextAttach) {
+      return withContextAttach(ctx, fn);
+    }
+    return context.with(ctx, fn);
+  }
+
+  private _bindEmitter(ctx: Context, ee: EventEmitter): void {
+    if (this.getConfig().useContextAttach) {
+      bindEmitterWithAttach(ctx, ee);
+    } else {
+      context.bind(ctx, ee);
+    }
   }
 
   override setConfig(config: HttpInstrumentationConfig = {}): void {
@@ -416,7 +434,7 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
           )
         );
 
-        context.bind(context.active(), response);
+        this._bindEmitter(context.active(), response);
 
         const endHandler = () => {
           this._diag.debug('outgoingRequest on end()');
@@ -540,11 +558,14 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
           true
         )
       ) {
-        return context.with(suppressTracing(context.active()), () => {
-          context.bind(context.active(), request);
-          context.bind(context.active(), response);
-          return original.apply(this, [event, ...args]);
-        });
+        return instrumentation._withContext(
+          suppressTracing(context.active()),
+          () => {
+            instrumentation._bindEmitter(context.active(), request);
+            instrumentation._bindEmitter(context.active(), response);
+            return original.apply(this, [event, ...args]);
+          }
+        );
       }
 
       const headers = request.headers;
@@ -599,11 +620,11 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
         span,
       };
 
-      return context.with(
+      return instrumentation._withContext(
         setRPCMetadata(trace.setSpan(ctx, span), rpcMetadata),
         () => {
-          context.bind(context.active(), request);
-          context.bind(context.active(), response);
+          instrumentation._bindEmitter(context.active(), request);
+          instrumentation._bindEmitter(context.active(), response);
 
           if (instrumentation.getConfig().requestHook) {
             instrumentation._callRequestHook(span, request);
@@ -754,13 +775,16 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
       }
       propagation.inject(requestContext, optionsParsed.headers);
 
-      return context.with(requestContext, () => {
+      const useContextAttach = !!instrumentation.getConfig().useContextAttach;
+      return instrumentation._withContext(requestContext, () => {
         /*
          * The response callback is registered before ClientRequest is bound,
-         * thus it is needed to bind it before the function call.
+         * thus it is needed to bind it before the function call. With
+         * `useContextAttach` the binding wraps `request.emit`, which already
+         * covers listeners registered before it.
          */
         const cb = args[args.length - 1];
-        if (typeof cb === 'function') {
+        if (typeof cb === 'function' && !useContextAttach) {
           args[args.length - 1] = context.bind(parentContext, cb);
         }
 
@@ -791,7 +815,11 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
         instrumentation._diag.debug(
           `${component} instrumentation outgoingRequest`
         );
-        context.bind(parentContext, request);
+        if (useContextAttach) {
+          bindEmitterWithAttach(parentContext, request);
+        } else {
+          context.bind(parentContext, request);
+        }
         return instrumentation._traceClientRequest(
           request,
           span,
