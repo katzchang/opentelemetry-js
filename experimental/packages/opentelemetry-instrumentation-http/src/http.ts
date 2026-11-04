@@ -134,15 +134,23 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
     this._httpClientDurationHistogram.record(durationMs / 1000, attributes);
   }
 
-  private _withContext<T>(ctx: Context, fn: () => T): T {
-    if (this.getConfig().useContextAttach) {
+  private _withContext<T>(
+    ctx: Context,
+    fn: () => T,
+    useContextAttach = !!this.getConfig().useContextAttach
+  ): T {
+    if (useContextAttach) {
       return withContextAttach(ctx, fn);
     }
     return context.with(ctx, fn);
   }
 
-  private _bindEmitter(ctx: Context, ee: EventEmitter): void {
-    if (this.getConfig().useContextAttach) {
+  private _bindEmitter(
+    ctx: Context,
+    ee: EventEmitter,
+    useContextAttach = !!this.getConfig().useContextAttach
+  ): void {
+    if (useContextAttach) {
       bindEmitterWithAttach(ctx, ee);
     } else {
       context.bind(ctx, ee);
@@ -538,6 +546,7 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
       const request = args[0] as http.IncomingMessage;
       const response = args[1] as http.ServerResponse & { socket: Socket };
       const method = request.method || 'GET';
+      const useContextAttach = !!instrumentation.getConfig().useContextAttach;
 
       instrumentation._diag.debug(
         `${component} instrumentation incomingRequest`
@@ -561,10 +570,19 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
         return instrumentation._withContext(
           suppressTracing(context.active()),
           () => {
-            instrumentation._bindEmitter(context.active(), request);
-            instrumentation._bindEmitter(context.active(), response);
+            instrumentation._bindEmitter(
+              context.active(),
+              request,
+              useContextAttach
+            );
+            instrumentation._bindEmitter(
+              context.active(),
+              response,
+              useContextAttach
+            );
             return original.apply(this, [event, ...args]);
-          }
+          },
+          useContextAttach
         );
       }
 
@@ -623,8 +641,16 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
       return instrumentation._withContext(
         setRPCMetadata(trace.setSpan(ctx, span), rpcMetadata),
         () => {
-          instrumentation._bindEmitter(context.active(), request);
-          instrumentation._bindEmitter(context.active(), response);
+          instrumentation._bindEmitter(
+            context.active(),
+            request,
+            useContextAttach
+          );
+          instrumentation._bindEmitter(
+            context.active(),
+            response,
+            useContextAttach
+          );
 
           if (instrumentation.getConfig().requestHook) {
             instrumentation._callRequestHook(span, request);
@@ -671,7 +697,8 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
               }
             }
           );
-        }
+        },
+        useContextAttach
       );
     };
   }
@@ -776,57 +803,61 @@ export class HttpInstrumentation extends InstrumentationBase<HttpInstrumentation
       propagation.inject(requestContext, optionsParsed.headers);
 
       const useContextAttach = !!instrumentation.getConfig().useContextAttach;
-      return instrumentation._withContext(requestContext, () => {
-        /*
-         * The response callback is registered before ClientRequest is bound,
-         * thus it is needed to bind it before the function call. With
-         * `useContextAttach` the binding wraps `request.emit`, which already
-         * covers listeners registered before it.
-         */
-        const cb = args[args.length - 1];
-        if (typeof cb === 'function' && !useContextAttach) {
-          args[args.length - 1] = context.bind(parentContext, cb);
-        }
-
-        const request: http.ClientRequest = safeExecuteInTheMiddle(
-          () => {
-            if (invalidUrl) {
-              // we know that the url is invalid, there's no point in injecting context as it will fail validation.
-              // Passing in what the user provided will give the user an error that matches what they'd see without
-              // the instrumentation.
-              return original.apply(this, [options, ...args]);
-            } else {
-              return original.apply(this, [optionsParsed, ...args]);
-            }
-          },
-          error => {
-            if (error) {
-              instrumentation._onOutgoingRequestError(
-                span,
-                metricAttributes,
-                startTime,
-                error
-              );
-              throw error;
-            }
+      return instrumentation._withContext(
+        requestContext,
+        () => {
+          /*
+           * The response callback is registered before ClientRequest is bound,
+           * thus it is needed to bind it before the function call. With
+           * `useContextAttach` the binding wraps `request.emit`, which already
+           * covers listeners registered before it.
+           */
+          const cb = args[args.length - 1];
+          if (typeof cb === 'function' && !useContextAttach) {
+            args[args.length - 1] = context.bind(parentContext, cb);
           }
-        );
 
-        instrumentation._diag.debug(
-          `${component} instrumentation outgoingRequest`
-        );
-        if (useContextAttach) {
-          bindEmitterWithAttach(parentContext, request);
-        } else {
-          context.bind(parentContext, request);
-        }
-        return instrumentation._traceClientRequest(
-          request,
-          span,
-          startTime,
-          metricAttributes
-        );
-      });
+          const request: http.ClientRequest = safeExecuteInTheMiddle(
+            () => {
+              if (invalidUrl) {
+                // we know that the url is invalid, there's no point in injecting context as it will fail validation.
+                // Passing in what the user provided will give the user an error that matches what they'd see without
+                // the instrumentation.
+                return original.apply(this, [options, ...args]);
+              } else {
+                return original.apply(this, [optionsParsed, ...args]);
+              }
+            },
+            error => {
+              if (error) {
+                instrumentation._onOutgoingRequestError(
+                  span,
+                  metricAttributes,
+                  startTime,
+                  error
+                );
+                throw error;
+              }
+            }
+          );
+
+          instrumentation._diag.debug(
+            `${component} instrumentation outgoingRequest`
+          );
+          instrumentation._bindEmitter(
+            parentContext,
+            request,
+            useContextAttach
+          );
+          return instrumentation._traceClientRequest(
+            request,
+            span,
+            startTime,
+            metricAttributes
+          );
+        },
+        useContextAttach
+      );
     };
   }
 

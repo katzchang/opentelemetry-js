@@ -124,7 +124,11 @@ export interface HttpInstrumentationConfig extends InstrumentationConfig {
    * `context.bind()`, which reduces per-request allocations. Requires
    * `@opentelemetry/api` >= 1.10 and a ContextManager implementing `attach()`
    * (e.g. `AsyncLocalStorageContextManager`); otherwise falls back to the
-   * default behavior.
+   * default behavior, and `@opentelemetry/api` logs a warning once.
+   *
+   * Instead of wrapping each listener, this replaces `emit` on each request
+   * and response object with an own property. Other code that patches `emit`
+   * on these objects interacts with it depending on the patching order.
    * @experimental
    */
   useContextAttach?: boolean;

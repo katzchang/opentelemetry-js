@@ -13,7 +13,9 @@ import {
   TracerProvider,
 } from '@opentelemetry/sdk-trace';
 import * as assert from 'assert';
+import { EventEmitter } from 'events';
 import type { Socket } from 'net';
+import { bindEmitterWithAttach } from '../../src/context-attach';
 import { HttpInstrumentation } from '../../src/http';
 import type { HttpInstrumentationConfig } from '../../src/types';
 
@@ -52,8 +54,12 @@ interface ServerObservation {
   suppressedOnEnd?: boolean;
 }
 
-[false, true].forEach(useContextAttach => {
-  describe(`HttpInstrumentation context propagation (useContextAttach=${useContextAttach})`, () => {
+[
+  { useContextAttach: false, attachSupported: true },
+  { useContextAttach: true, attachSupported: true },
+  { useContextAttach: true, attachSupported: false },
+].forEach(({ useContextAttach, attachSupported }) => {
+  describe(`HttpInstrumentation context propagation (useContextAttach=${useContextAttach}${attachSupported ? '' : ', ContextManager without attach()'})`, () => {
     let contextManager: ContextManager;
     let server: http.Server;
     let port: number;
@@ -100,6 +106,9 @@ interface ServerObservation {
 
     beforeEach(() => {
       contextManager = new AsyncLocalStorageContextManager().enable();
+      if (!attachSupported) {
+        (contextManager as { attach?: unknown }).attach = undefined;
+      }
       context.setGlobalContextManager(contextManager);
       memoryExporter.reset();
       setConfig();
@@ -158,10 +167,11 @@ interface ServerObservation {
       }
     });
 
-    it(`${useContextAttach ? 'uses attach() instead of' : 'uses'} with()/bind() on the request path`, async () => {
+    it('uses the expected context API on the request path', async () => {
       const manager = contextManager as AsyncLocalStorageContextManager;
       const calls = { with: 0, bind: 0, attach: 0 };
       for (const method of ['with', 'bind', 'attach'] as const) {
+        if (typeof (manager as any)[method] !== 'function') continue;
         const original = (manager as any)[method].bind(manager);
 
         (manager as any)[method] = (...args: unknown[]) => {
@@ -176,9 +186,17 @@ interface ServerObservation {
         });
       });
       await delay(10);
-      if (useContextAttach) {
+      if (useContextAttach && attachSupported) {
         assert.strictEqual(calls.bind, 0);
+        // SimpleSpanProcessor exports each span inside context.with().
+        assert.strictEqual(
+          calls.with,
+          memoryExporter.getFinishedSpans().length
+        );
         assert.ok(calls.attach > 0);
+      } else if (useContextAttach) {
+        assert.strictEqual(calls.bind, 0);
+        assert.ok(calls.with > 0);
       } else {
         assert.ok(calls.bind > 0);
         assert.strictEqual(calls.attach, 0);
@@ -383,5 +401,51 @@ interface ServerObservation {
       assert.strictEqual(serverObserved.suppressed, true);
       assert.strictEqual(serverObserved.suppressedOnEnd, true);
     });
+  });
+});
+
+describe('bindEmitterWithAttach', () => {
+  beforeEach(() => {
+    context.setGlobalContextManager(
+      new AsyncLocalStorageContextManager().enable()
+    );
+  });
+
+  afterEach(() => {
+    context.disable();
+  });
+
+  it('restores the previous context when a listener throws', () => {
+    withParent('outer', outer => {
+      const bound = tracer.startSpan('bound');
+      const ee = bindEmitterWithAttach(
+        trace.setSpan(context.active(), bound),
+        new EventEmitter()
+      );
+      let inListener: string | undefined;
+      ee.on('test', () => {
+        inListener = activeSpanId();
+        throw new Error('boom');
+      });
+      assert.throws(() => ee.emit('test'), /boom/);
+      assert.strictEqual(inListener, bound.spanContext().spanId);
+      assert.strictEqual(activeSpanId(), outer.spanContext().spanId);
+    });
+  });
+
+  it('falls back to context.bind() when emit is read-only', () => {
+    const bound = tracer.startSpan('bound');
+    const ee = new EventEmitter();
+    Object.defineProperty(ee, 'emit', {
+      value: EventEmitter.prototype.emit,
+      writable: false,
+    });
+    bindEmitterWithAttach(trace.setSpan(context.active(), bound), ee);
+    let inListener: string | undefined;
+    ee.on('test', () => {
+      inListener = activeSpanId();
+    });
+    ee.emit('test');
+    assert.strictEqual(inListener, bound.spanContext().spanId);
   });
 });

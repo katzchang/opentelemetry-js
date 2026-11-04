@@ -56,13 +56,20 @@ export function withContextAttach<T>(ctx: Context, fn: () => T): T {
  * Same contract as `context.bind(ctx, ee)`: listeners of `ee` run with `ctx`
  * active. Instead of wrapping every listener as it is added, `ee.emit` is
  * wrapped once, which also covers listeners added before this call.
+ *
+ * `emit` is replaced with an own property of `ee`. Other code that later
+ * restores or replaces `emit` without calling the previous one removes the
+ * binding. If `emit` cannot be assigned, falls back to `context.bind()`.
  */
 export function bindEmitterWithAttach<T extends EventEmitter>(
   ctx: Context,
   ee: T
 ): T {
   const originalEmit = ee.emit;
-  ee.emit = function (this: T, ...args: Parameters<T['emit']>): boolean {
+  const wrappedEmit = function (
+    this: T,
+    ...args: Parameters<T['emit']>
+  ): boolean {
     const event = args[0];
     if (
       context.active() === ctx ||
@@ -80,6 +87,11 @@ export function bindEmitterWithAttach<T extends EventEmitter>(
     } finally {
       token.dispose();
     }
-  } as T['emit'];
+  };
+  try {
+    ee.emit = wrappedEmit as T['emit'];
+  } catch {
+    return context.bind(ctx, ee);
+  }
   return ee;
 }
